@@ -1,0 +1,383 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover" />
+<title>Live Captions</title>
+
+<!-- iOS "Add to Home Screen" behaves like an app with these -->
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="Captions" />
+<meta name="theme-color" content="#0E1116" />
+<link rel="manifest" href="manifest.webmanifest" />
+
+<style>
+  :root{
+    --bg:#0E1116;
+    --panel:#161B22;
+    --hair:rgba(255,255,255,0.08);
+    --ink:#F2F4F7;
+    --ink-dim:rgba(242,244,247,0.40);
+    --ink-soft:rgba(242,244,247,0.70);
+    --amber:#FFB020;
+    --amber-soft:rgba(255,176,32,0.16);
+    --red:#FF6B6B;
+    --cap:2.0rem;            /* caption size, adjusted by +/- */
+    font-size:16px;
+  }
+  *{box-sizing:border-box;}
+  html,body{height:100%;margin:0;}
+  body{
+    background:var(--bg);
+    color:var(--ink);
+    font-family:-apple-system,system-ui,"SF Pro Text","Noto Sans Telugu","Noto Sans Devanagari",sans-serif;
+    display:flex;flex-direction:column;
+    height:100dvh;
+    overflow:hidden;
+    -webkit-text-size-adjust:100%;
+  }
+
+  /* ---- top bar ---- */
+  header{
+    flex:0 0 auto;
+    padding:calc(env(safe-area-inset-top) + 10px) 14px 10px;
+    border-bottom:1px solid var(--hair);
+    background:var(--panel);
+    display:flex;flex-direction:column;gap:10px;
+  }
+  .row{display:flex;align-items:center;gap:10px;}
+  .brand{display:flex;align-items:center;gap:9px;font-weight:600;font-size:.95rem;letter-spacing:.01em;}
+  .dot{width:10px;height:10px;border-radius:50%;background:var(--ink-dim);flex:0 0 auto;}
+  .dot.live{background:var(--amber);box-shadow:0 0 0 0 var(--amber-soft);animation:pulse 1.6s ease-out infinite;}
+  .dot.err{background:var(--red);}
+  @keyframes pulse{0%{box-shadow:0 0 0 0 rgba(255,176,32,.45);}70%{box-shadow:0 0 0 12px rgba(255,176,32,0);}100%{box-shadow:0 0 0 0 rgba(255,176,32,0);}}
+  @media (prefers-reduced-motion: reduce){.dot.live{animation:none;}}
+  .status{font-size:.8rem;color:var(--ink-soft);margin-left:auto;text-align:right;min-height:1em;}
+
+  /* language segmented control */
+  .seg{display:flex;background:#0d1117;border:1px solid var(--hair);border-radius:12px;padding:3px;flex:1 1 auto;}
+  .seg button{
+    flex:1;appearance:none;border:0;background:transparent;color:var(--ink-soft);
+    font:inherit;font-weight:600;font-size:.95rem;padding:9px 4px;border-radius:9px;
+    min-height:42px;cursor:pointer;transition:background .15s,color .15s;
+  }
+  .seg button[aria-pressed="true"]{background:var(--amber);color:#1a1205;}
+  .sizebtns{display:flex;gap:6px;}
+  .sizebtns button{
+    width:42px;height:42px;border-radius:11px;border:1px solid var(--hair);
+    background:#0d1117;color:var(--ink);font-size:1.2rem;line-height:1;cursor:pointer;
+  }
+
+  /* ---- caption stage ---- */
+  main{
+    flex:1 1 auto;overflow-y:auto;padding:18px 18px 8px;
+    display:flex;flex-direction:column;justify-content:flex-end;gap:.55em;
+    -webkit-overflow-scrolling:touch;
+  }
+  .line{font-size:var(--cap);line-height:1.32;color:var(--ink-dim);transition:color .25s;word-break:break-word;}
+  .line.current{color:var(--ink);font-weight:600;}
+  .hint{margin:auto;color:var(--ink-dim);text-align:center;font-size:1.05rem;max-width:22em;line-height:1.5;}
+  .hint strong{color:var(--ink-soft);font-weight:600;}
+
+  /* ---- bottom control ---- */
+  footer{
+    flex:0 0 auto;padding:12px 18px calc(env(safe-area-inset-bottom) + 16px);
+    border-top:1px solid var(--hair);background:var(--panel);
+  }
+  .mic{
+    width:100%;min-height:60px;border:0;border-radius:16px;cursor:pointer;
+    font:inherit;font-weight:700;font-size:1.15rem;letter-spacing:.02em;
+    color:#1a1205;background:var(--amber);
+    display:flex;align-items:center;justify-content:center;gap:10px;
+    transition:transform .08s, background .2s;
+  }
+  .mic:active{transform:scale(.99);}
+  .mic.on{background:#2a2f37;color:var(--ink);border:1px solid var(--hair);}
+  .mic .ico{width:14px;height:14px;border-radius:50%;background:currentColor;}
+  .mic.on .ico{border-radius:3px;background:var(--red);}
+  .tools{display:flex;gap:8px;margin-bottom:10px;}
+  .tool{flex:1;min-height:44px;border:1px solid var(--hair);background:#0d1117;color:var(--ink-soft);
+        font:inherit;font-weight:600;font-size:.95rem;border-radius:12px;cursor:pointer;}
+  .tool:active{transform:scale(.99);}
+  .toggle{width:100%;min-height:44px;display:flex;align-items:center;justify-content:space-between;
+          gap:10px;padding:0 14px;border:1px solid var(--hair);background:#0d1117;color:var(--ink-soft);
+          font:inherit;font-weight:600;font-size:.95rem;border-radius:12px;cursor:pointer;text-align:left;}
+  .toggle small{color:var(--ink-dim);font-weight:500;}
+  .toggle .state{font-weight:700;color:var(--ink-dim);}
+  .toggle[aria-pressed="true"]{border-color:var(--amber);background:var(--amber-soft);color:var(--ink);}
+  .toggle[aria-pressed="true"] .state{color:var(--amber);}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="row">
+    <span class="brand"><span id="dot" class="dot"></span> Live Captions</span>
+    <span id="status" class="status">Tap Start to listen</span>
+  </div>
+  <div class="row">
+    <div class="seg" role="group" aria-label="Language">
+      <button data-lang="te-IN" data-mode="transcribe" aria-pressed="true">తెలుగు</button>
+      <button data-lang="hi-IN" data-mode="transcribe" aria-pressed="false">हिंदी</button>
+      <button data-lang="unknown" data-mode="translate" aria-pressed="false">English</button>
+    </div>
+    <div class="sizebtns">
+      <button id="smaller" aria-label="Smaller text">A−</button>
+      <button id="bigger" aria-label="Bigger text">A+</button>
+    </div>
+  </div>
+  <div class="row">
+    <button id="media" class="toggle" aria-pressed="false">
+      <span>Media mode <small>— for TV / theatre speakers</small></span>
+      <span class="state">OFF</span>
+    </button>
+  </div>
+</header>
+
+<main id="stage">
+  <div class="hint" id="hint">
+    Point the phone toward whoever is speaking, then tap <strong>Start</strong>.<br/>
+    Pick <strong>తెలుగు</strong> or <strong>हिंदी</strong> to read the same language, or
+    <strong>English</strong> to read a live translation.
+  </div>
+</main>
+
+<footer>
+  <div class="tools">
+    <button id="save" class="tool">Save transcript</button>
+    <button id="clear" class="tool">Clear</button>
+  </div>
+  <button id="mic" class="mic"><span class="ico"></span><span id="micLabel">Start</span></button>
+</footer>
+
+<script>
+(() => {
+  "use strict";
+
+  // ---------- state ----------
+  let lang = localStorage.getItem("lc_lang") || "te-IN";
+  let mode = localStorage.getItem("lc_mode") || "transcribe";
+  let capSize = parseFloat(localStorage.getItem("lc_size") || "2.0");
+  let mediaMode = localStorage.getItem("lc_media") === "1";
+  let running = false;
+  let ws = null, audioCtx = null, processor = null, source = null, micStream = null;
+  let wakeLock = null;
+  let reconnectTimer = null, backoff = 500;
+  const TARGET_RATE = 16000;
+
+  // ---------- elements ----------
+  const $ = (id) => document.getElementById(id);
+  const stage = $("stage"), hint = $("hint"), statusEl = $("status"), dot = $("dot");
+  const micBtn = $("mic"), micLabel = $("micLabel");
+  const segBtns = Array.from(document.querySelectorAll(".seg button"));
+
+  applySize();
+
+  // ---------- UI: language switch ----------
+  segBtns.forEach((b) => {
+    b.addEventListener("click", () => {
+      segBtns.forEach((x) => x.setAttribute("aria-pressed", x === b ? "true" : "false"));
+      lang = b.dataset.lang; mode = b.dataset.mode;
+      localStorage.setItem("lc_lang", lang); localStorage.setItem("lc_mode", mode);
+      if (running) { stop(); start(); }   // re-open stream with the new setting
+    });
+    if (b.dataset.lang === lang) segBtns.forEach((x)=>x.setAttribute("aria-pressed", x===b?"true":"false"));
+  });
+
+  // ---------- UI: text size ----------
+  $("bigger").addEventListener("click", () => { capSize = Math.min(capSize + 0.25, 4.0); applySize(); });
+  $("smaller").addEventListener("click", () => { capSize = Math.max(capSize - 0.25, 1.25); applySize(); });
+  function applySize(){ document.documentElement.style.setProperty("--cap", capSize + "rem"); localStorage.setItem("lc_size", capSize); }
+
+  // ---------- UI: media mode (TV / loudspeaker audio) ----------
+  const mediaBtn = $("media");
+  applyMedia();
+  mediaBtn.addEventListener("click", () => {
+    mediaMode = !mediaMode;
+    localStorage.setItem("lc_media", mediaMode ? "1" : "0");
+    applyMedia();
+    if (running) { stop(); start(); }   // re-open the mic with the new audio settings
+  });
+  function applyMedia(){
+    mediaBtn.setAttribute("aria-pressed", mediaMode ? "true" : "false");
+    mediaBtn.querySelector(".state").textContent = mediaMode ? "ON" : "OFF";
+  }
+
+  // ---------- UI: start/stop ----------
+  micBtn.addEventListener("click", () => { running ? stop() : start(); });
+
+  // ---------- UI: save / clear ----------
+  $("save").addEventListener("click", saveTranscript);
+  $("clear").addEventListener("click", () => {
+    transcript.length = 0;
+    stage.innerHTML = '<div class="hint" id="hint">Cleared. Tap <strong>Start</strong> when ready.</div>';
+  });
+
+  async function saveTranscript(){
+    if (!transcript.length){ setStatus("Nothing to save yet"); return; }
+    const body = `Live Captions — ${new Date().toLocaleString()}\n\n` +
+      transcript.map((l) => `[${l.time}] ${l.text}`).join("\n");
+    const fname = "captions-" + new Date().toISOString().slice(0,16).replace(/[:T]/g,"-") + ".txt";
+    try {
+      const file = new File([body], fname, { type: "text/plain" });
+      if (navigator.canShare && navigator.canShare({ files: [file] })){
+        await navigator.share({ files: [file], title: "Live Captions" }); return;
+      }
+      if (navigator.share){ await navigator.share({ title: "Live Captions", text: body }); return; }
+    } catch (e){ if (e && e.name === "AbortError") return; }
+    // Fallback for non-iOS / older browsers
+    try { await navigator.clipboard.writeText(body); setStatus("Copied to clipboard"); } catch(_){}
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([body], { type: "text/plain" }));
+    a.download = fname; document.body.appendChild(a); a.click();
+    setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+  }
+
+  function setStatus(t){ statusEl.textContent = t; }
+  function setDot(s){ dot.className = "dot" + (s ? " " + s : ""); }
+
+  // ---------- captions ----------
+  const transcript = [];
+  function nowHM(){ return new Date().toTimeString().slice(0, 5); }
+  function addLine(text){
+    if (!text || !text.trim()) return;
+    const t = text.trim();
+    const hintEl = document.getElementById("hint"); if (hintEl) hintEl.remove();
+    const prev = stage.querySelector(".line.current");
+    if (prev) prev.classList.remove("current");
+    const el = document.createElement("div");
+    el.className = "line current";
+    el.textContent = t;
+    stage.appendChild(el);
+    transcript.push({ time: nowHM(), text: t });
+    while (stage.querySelectorAll(".line").length > 60) stage.querySelector(".line").remove();
+    stage.scrollTop = stage.scrollHeight;
+  }
+
+  // ---------- start / stop ----------
+  async function start(){
+    try {
+      const audio = mediaMode
+        ? { echoCancellation:false, noiseSuppression:false, autoGainControl:false }  // raw room/speaker audio
+        : { echoCancellation:false, noiseSuppression:true,  autoGainControl:true };   // tuned for nearby voices
+      micStream = await navigator.mediaDevices.getUserMedia({ audio });
+    } catch (e){
+      setDot("err"); setStatus("Microphone blocked — allow it in Settings"); return;
+    }
+    running = true; backoff = 500;
+    micBtn.classList.add("on"); micLabel.textContent = "Stop";
+    setupAudio();
+    openSocket();
+    requestWakeLock();
+  }
+
+  function stop(){
+    running = false;
+    clearTimeout(reconnectTimer);
+    micBtn.classList.remove("on"); micLabel.textContent = "Start";
+    setDot(""); setStatus("Stopped");
+    teardownAudio();
+    if (ws) { try { ws.close(1000); } catch(_){} ws = null; }
+    releaseWakeLock();
+  }
+
+  // ---------- audio capture + 16k PCM ----------
+  function setupAudio(){
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    if (audioCtx.state === "suspended") audioCtx.resume();
+    source = audioCtx.createMediaStreamSource(micStream);
+    processor = audioCtx.createScriptProcessor(4096, 1, 1);
+    const mute = audioCtx.createGain(); mute.gain.value = 0;   // process without playing audio back
+    source.connect(processor); processor.connect(mute); mute.connect(audioCtx.destination);
+
+    processor.onaudioprocess = (ev) => {
+      if (!ws || ws.readyState !== 1) return;
+      const input = ev.inputBuffer.getChannelData(0);
+      const pcm16 = downsampleToInt16(input, audioCtx.sampleRate, TARGET_RATE);
+      if (!pcm16.length) return;
+      ws.send(JSON.stringify({
+        audio: { data: base64FromBytes(new Uint8Array(pcm16.buffer)), sample_rate: "16000", encoding: "audio/wav" }
+      }));
+    };
+  }
+
+  function teardownAudio(){
+    try { if (processor){ processor.disconnect(); processor.onaudioprocess = null; } } catch(_){}
+    try { if (source) source.disconnect(); } catch(_){}
+    try { if (micStream) micStream.getTracks().forEach(t => t.stop()); } catch(_){}
+    try { if (audioCtx) audioCtx.close(); } catch(_){}
+    processor = source = micStream = audioCtx = null;
+  }
+
+  function downsampleToInt16(input, inRate, outRate){
+    const ratio = inRate / outRate;
+    const outLen = Math.floor(input.length / ratio);
+    const out = new Int16Array(outLen);
+    let pos = 0;
+    for (let i = 0; i < outLen; i++){
+      const start = Math.floor(pos), end = Math.min(Math.floor(pos + ratio), input.length);
+      let sum = 0, n = 0;
+      for (let j = start; j < end; j++){ sum += input[j]; n++; }
+      let s = n ? sum / n : input[start] || 0;
+      s = Math.max(-1, Math.min(1, s));
+      out[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+      pos += ratio;
+    }
+    return out;
+  }
+
+  function base64FromBytes(bytes){
+    let bin = "";
+    const chunk = 0x8000;
+    for (let i = 0; i < bytes.length; i += chunk)
+      bin += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+    return btoa(bin);
+  }
+
+  // ---------- relay socket ----------
+  function openSocket(){
+    const scheme = location.protocol === "https:" ? "wss" : "ws";
+    const url = `${scheme}://${location.host}/stt?lang=${encodeURIComponent(lang)}&mode=${encodeURIComponent(mode)}`;
+    setDot(""); setStatus("Connecting…");
+    ws = new WebSocket(url);
+
+    ws.onopen = () => { setDot("live"); setStatus(modeLabel() + " · listening"); backoff = 500; };
+
+    ws.onmessage = (ev) => {
+      let m; try { m = JSON.parse(ev.data); } catch(_){ return; }
+      if (m.type === "error"){ setDot("err"); setStatus(m.message || "Server error"); return; }
+      const t = m && m.data && (m.data.transcript ?? m.data.text);
+      if (t) addLine(t);
+    };
+
+    ws.onclose = (ev) => {
+      if (!running) return;
+      setDot("err");
+      if (ev.code >= 4000 && ev.code < 5000){          // auth / quota — don't loop
+        setStatus("Stopped: " + (ev.reason || "check API key or credits"));
+        running = false; micBtn.classList.remove("on"); micLabel.textContent = "Start";
+        teardownAudio(); releaseWakeLock(); return;
+      }
+      setStatus("Reconnecting…");
+      reconnectTimer = setTimeout(openSocket, backoff);
+      backoff = Math.min(backoff * 2, 8000);
+    };
+
+    ws.onerror = () => { setStatus("Connection problem"); };
+  }
+
+  function modeLabel(){ return mode === "translate" ? "English" : (lang === "hi-IN" ? "हिंदी" : "తెలుగు"); }
+
+  // ---------- keep screen awake ----------
+  async function requestWakeLock(){
+    try { if ("wakeLock" in navigator) wakeLock = await navigator.wakeLock.request("screen"); } catch(_){}
+  }
+  function releaseWakeLock(){ try { if (wakeLock){ wakeLock.release(); wakeLock = null; } } catch(_){} }
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible" && running) requestWakeLock();
+  });
+})();
+</script>
+</body>
+</html>
