@@ -161,10 +161,12 @@
   let capSize = parseFloat(localStorage.getItem("lc_size") || "2.0");
   let mediaMode = localStorage.getItem("lc_media") === "1";
   let running = false;
-  let ws = null, audioCtx = null, processor = null, source = null, micStream = null;
+  let ws = null, audioCtx = null, processor = null, audioNode = null, source = null, micStream = null;
   let wakeLock = null;
   let reconnectTimer = null, backoff = 500;
+  let lastAudioTs = 0, watchdog = null;
   const TARGET_RATE = 16000;
+  const MIC_GAIN = 2.5;   // boost applied in Media mode to lift quiet/distant speech
 
   // ---------- elements ----------
   const $ = (id) => document.getElementById(id);
@@ -267,14 +269,21 @@
     }
     running = true; backoff = 500;
     micBtn.classList.add("on"); micLabel.textContent = "Stop";
-    setupAudio();
+    try { await setupAudio(); }
+    catch (e){
+      setDot("err"); setStatus("Audio setup failed — tap Start again");
+      running = false; micBtn.classList.remove("on"); micLabel.textContent = "Start";
+      teardownAudio(); return;
+    }
     openSocket();
     requestWakeLock();
+    startWatchdog();
   }
 
   function stop(){
     running = false;
     clearTimeout(reconnectTimer);
+    stopWatchdog();
     micBtn.classList.remove("on"); micLabel.textContent = "Start";
     setDot(""); setStatus("Stopped");
     teardownAudio();
@@ -283,34 +292,120 @@
   }
 
   // ---------- audio capture + 16k PCM ----------
-  function setupAudio(){
-    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-    if (audioCtx.state === "suspended") audioCtx.resume();
-    source = audioCtx.createMediaStreamSource(micStream);
-    processor = audioCtx.createScriptProcessor(4096, 1, 1);
-    const mute = audioCtx.createGain(); mute.gain.value = 0;   // process without playing audio back
-    source.connect(processor); processor.connect(mute); mute.connect(audioCtx.destination);
+  // Runs on the AudioWorklet (a dedicated audio thread) so capture doesn't
+  // silently freeze on iPhones the way ScriptProcessor can. Falls back to
+  // ScriptProcessor only if the worklet can't load.
+  const WORKLET_SRC = `
+    class PCMWorklet extends AudioWorkletProcessor {
+      constructor(options){
+        super();
+        const o = (options && options.processorOptions) || {};
+        this.targetRate = o.targetRate || 16000;
+        this.gain = o.gain || 1;
+        this.ratio = sampleRate / this.targetRate;
+        this.chunkIn = Math.max(1, Math.round(this.ratio * Math.round(this.targetRate * 0.1)));
+        this.acc = new Float32Array(0);
+      }
+      _down(block){
+        const outLen = Math.floor(block.length / this.ratio);
+        const out = new Int16Array(outLen);
+        let pos = 0;
+        for (let i=0;i<outLen;i++){
+          const start = Math.floor(pos), end = Math.min(Math.floor(pos+this.ratio), block.length);
+          let sum=0,n=0;
+          for (let j=start;j<end;j++){ sum+=block[j]; n++; }
+          let s = (n ? sum/n : block[start]||0) * this.gain;
+          s = Math.max(-1, Math.min(1, s));
+          out[i] = s<0 ? s*0x8000 : s*0x7FFF;
+          pos += this.ratio;
+        }
+        return out;
+      }
+      process(inputs){
+        const ch = inputs[0] && inputs[0][0];
+        if (ch && ch.length){
+          const merged = new Float32Array(this.acc.length + ch.length);
+          merged.set(this.acc); merged.set(ch, this.acc.length);
+          this.acc = merged;
+          while (this.acc.length >= this.chunkIn){
+            const block = this.acc.subarray(0, this.chunkIn);
+            const pcm = this._down(block);
+            this.port.postMessage(pcm.buffer, [pcm.buffer]);
+            this.acc = this.acc.slice(this.chunkIn);
+          }
+        }
+        return true;
+      }
+    }
+    registerProcessor('pcm-worklet', PCMWorklet);
+  `;
 
-    processor.onaudioprocess = (ev) => {
-      if (!ws || ws.readyState !== 1) return;
-      const input = ev.inputBuffer.getChannelData(0);
-      const pcm16 = downsampleToInt16(input, audioCtx.sampleRate, TARGET_RATE);
-      if (!pcm16.length) return;
+  async function setupAudio(){
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    if (audioCtx.state !== "running") { try { await audioCtx.resume(); } catch(_){} }
+    source = audioCtx.createMediaStreamSource(micStream);
+    const gain = mediaMode ? MIC_GAIN : 1.0;   // only boost in Media mode (AGC is off there)
+
+    const onPcm = (int16) => {
+      lastAudioTs = Date.now();
+      if (!ws || ws.readyState !== 1 || !int16.length) return;
       ws.send(JSON.stringify({
-        audio: { data: base64FromBytes(new Uint8Array(pcm16.buffer)), sample_rate: "16000", encoding: "audio/wav" }
+        audio: { data: base64FromBytes(new Uint8Array(int16.buffer)), sample_rate: "16000", encoding: "audio/wav" }
       }));
     };
+
+    let usedWorklet = false;
+    if (audioCtx.audioWorklet) {
+      try {
+        const url = URL.createObjectURL(new Blob([WORKLET_SRC], { type: "application/javascript" }));
+        await audioCtx.audioWorklet.addModule(url);
+        URL.revokeObjectURL(url);
+        audioNode = new AudioWorkletNode(audioCtx, "pcm-worklet", {
+          processorOptions: { targetRate: TARGET_RATE, gain: gain }
+        });
+        audioNode.port.onmessage = (e) => onPcm(new Int16Array(e.data));
+        source.connect(audioNode);
+        audioNode.connect(audioCtx.destination);   // pulled by the graph; outputs silence
+        usedWorklet = true;
+      } catch (_) { usedWorklet = false; }
+    }
+
+    if (!usedWorklet) {   // fallback for very old browsers
+      processor = audioCtx.createScriptProcessor(4096, 1, 1);
+      const mute = audioCtx.createGain(); mute.gain.value = 0;
+      source.connect(processor); processor.connect(mute); mute.connect(audioCtx.destination);
+      processor.onaudioprocess = (ev) => {
+        onPcm(downsampleToInt16(ev.inputBuffer.getChannelData(0), audioCtx.sampleRate, TARGET_RATE, gain));
+      };
+    }
   }
 
   function teardownAudio(){
+    try { if (audioNode){ audioNode.port.onmessage = null; audioNode.disconnect(); } } catch(_){}
     try { if (processor){ processor.disconnect(); processor.onaudioprocess = null; } } catch(_){}
     try { if (source) source.disconnect(); } catch(_){}
     try { if (micStream) micStream.getTracks().forEach(t => t.stop()); } catch(_){}
     try { if (audioCtx) audioCtx.close(); } catch(_){}
-    processor = source = micStream = audioCtx = null;
+    audioNode = processor = source = micStream = audioCtx = null;
   }
 
-  function downsampleToInt16(input, inRate, outRate){
+  // ---------- stall watchdog: self-heal if capture freezes ----------
+  function startWatchdog(){
+    stopWatchdog();
+    lastAudioTs = Date.now();
+    watchdog = setInterval(() => {
+      if (!running) return;
+      if (audioCtx && audioCtx.state !== "running") { audioCtx.resume().catch(()=>{}); }
+      if (Date.now() - lastAudioTs > 3500) {   // no audio frames -> capture stalled
+        setStatus("Audio stalled — restarting…");
+        stop(); start();
+      }
+    }, 1500);
+  }
+  function stopWatchdog(){ if (watchdog){ clearInterval(watchdog); watchdog = null; } }
+
+  function downsampleToInt16(input, inRate, outRate, gain){
+    gain = gain || 1;
     const ratio = inRate / outRate;
     const outLen = Math.floor(input.length / ratio);
     const out = new Int16Array(outLen);
@@ -319,7 +414,7 @@
       const start = Math.floor(pos), end = Math.min(Math.floor(pos + ratio), input.length);
       let sum = 0, n = 0;
       for (let j = start; j < end; j++){ sum += input[j]; n++; }
-      let s = n ? sum / n : input[start] || 0;
+      let s = (n ? sum / n : input[start] || 0) * gain;
       s = Math.max(-1, Math.min(1, s));
       out[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
       pos += ratio;
