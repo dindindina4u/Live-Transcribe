@@ -166,7 +166,7 @@
   let reconnectTimer = null, backoff = 500;
   let lastAudioTs = 0, watchdog = null;
   const TARGET_RATE = 16000;
-  const MIC_GAIN = 2.5;   // boost applied in Media mode to lift quiet/distant speech
+  const MIC_GAIN = 1.5;   // light extra lift in Media mode, on top of auto-gain
 
   // ---------- elements ----------
   const $ = (id) => document.getElementById(id);
@@ -261,7 +261,7 @@
   async function start(){
     try {
       const audio = mediaMode
-        ? { echoCancellation:false, noiseSuppression:false, autoGainControl:false }  // raw room/speaker audio
+        ? { echoCancellation:false, noiseSuppression:false, autoGainControl:true }   // far/quiet: auto-lift the level
         : { echoCancellation:false, noiseSuppression:true,  autoGainControl:true };   // tuned for nearby voices
       micStream = await navigator.mediaDevices.getUserMedia({ audio });
     } catch (e){
