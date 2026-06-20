@@ -145,9 +145,11 @@
 
 <footer>
   <div class="tools">
-    <button id="save" class="tool">Save transcript</button>
+    <button id="save" class="tool">Save</button>
     <button id="clear" class="tool">Clear</button>
+    <button id="import" class="tool">Import audio</button>
   </div>
+  <input id="fileInput" type="file" accept="audio/*" style="display:none" />
   <button id="mic" class="mic"><span class="ico"></span><span id="micLabel">Start</span></button>
 </footer>
 
@@ -234,6 +236,98 @@
     a.href = URL.createObjectURL(new Blob([body], { type: "text/plain" }));
     a.download = fname; document.body.appendChild(a); a.click();
     setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+  }
+
+  // ---------- import a recording / voice memo ----------
+  const fileInput = $("fileInput");
+  let fileSending = false;
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  $("import").addEventListener("click", () => {
+    if (fileSending) return;
+    fileInput.value = "";
+    fileInput.click();
+  });
+  fileInput.addEventListener("change", () => {
+    const f = fileInput.files && fileInput.files[0];
+    if (f) transcribeFile(f);
+  });
+
+  function waitOpen(sock){
+    return new Promise((res, rej) => {
+      if (sock.readyState === 1) return res();
+      sock.addEventListener("open", () => res(), { once:true });
+      sock.addEventListener("error", () => rej(), { once:true });
+      setTimeout(() => rej(), 8000);
+    });
+  }
+
+  function audioBufferToInt16(audioBuf, outRate){
+    const len = audioBuf.length, chs = audioBuf.numberOfChannels;
+    const mono = new Float32Array(len);
+    for (let c = 0; c < chs; c++){
+      const d = audioBuf.getChannelData(c);
+      for (let i = 0; i < len; i++) mono[i] += d[i] / chs;   // mix to mono
+    }
+    return downsampleToInt16(mono, audioBuf.sampleRate, outRate, 1.0);
+  }
+
+  async function transcribeFile(file){
+    if (running) stop();              // can't run mic + file at once
+    fileSending = true; micBtn.disabled = true;
+    setDot(""); setStatus("Reading file…");
+
+    let pcm;
+    try {
+      const buf = await file.arrayBuffer();
+      const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      const audioBuf = await ctx.decodeAudioData(buf);
+      pcm = audioBufferToInt16(audioBuf, TARGET_RATE);
+      ctx.close();
+    } catch (e){
+      setDot("err"); setStatus("Couldn't read that audio file");
+      fileSending = false; micBtn.disabled = false; return;
+    }
+
+    const scheme = location.protocol === "https:" ? "wss" : "ws";
+    const url = `${scheme}://${location.host}/stt?lang=${encodeURIComponent(lang)}&mode=${encodeURIComponent(mode)}`;
+    const fws = new WebSocket(url);
+    let closed = false;
+    fws.onmessage = (ev) => {
+      let m; try { m = JSON.parse(ev.data); } catch(_){ return; }
+      if (m.type === "error"){ setDot("err"); setStatus(m.message || "Server error"); return; }
+      const t = m && m.data && (m.data.transcript ?? m.data.text);
+      if (t) addLine(t);
+    };
+    fws.onclose = () => { closed = true; };
+
+    try { await waitOpen(fws); }
+    catch(_){ setDot("err"); setStatus("Couldn't connect"); fileSending = false; micBtn.disabled = false; return; }
+
+    setDot("live");
+    const chunk = TARGET_RATE / 10;           // 100ms of samples
+    const total = pcm.length;
+    for (let off = 0; off < total; off += chunk){
+      if (closed || !fileSending) break;
+      const slice = pcm.subarray(off, Math.min(off + chunk, total));
+      fws.send(JSON.stringify({
+        audio: { data: base64FromBytes(new Uint8Array(slice.buffer, slice.byteOffset, slice.byteLength)),
+                 sample_rate: "16000", encoding: "audio/wav" }
+      }));
+      setStatus("Transcribing… " + Math.min(100, Math.round((off / total) * 100)) + "%");
+      await sleep(25);                         // feed ~4x faster than real time
+    }
+    // trailing silence so the final sentence gets finalized
+    const silence = new Int16Array(Math.round(TARGET_RATE * 0.8));
+    if (!closed) fws.send(JSON.stringify({
+      audio: { data: base64FromBytes(new Uint8Array(silence.buffer)), sample_rate: "16000", encoding: "audio/wav" }
+    }));
+
+    setStatus("Finishing…");
+    await sleep(2500);                          // let the last transcripts arrive
+    try { fws.close(1000); } catch(_){}
+    setDot(""); setStatus("Done — file transcribed");
+    fileSending = false; micBtn.disabled = false;
   }
 
   function setStatus(t){ statusEl.textContent = t; }
